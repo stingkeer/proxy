@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/http/httputil"
 	"os"
 	"strings"
 	"time"
@@ -99,7 +101,20 @@ func (s *Server) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 
 	target := fmt.Sprintf("%s/%s", *target, r.RequestURI)
 	target = strings.TrimSuffix(target, "/")
-	req, _ := http.NewRequest(r.Method, target, r.Body)
+
+	var reqBodyBytes []byte
+	if r.Body != nil {
+		reqBodyBytes, _ = io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewBuffer(reqBodyBytes))
+	}
+	req, _ := http.NewRequest(r.Method, target, bytes.NewBuffer(reqBodyBytes))
+
+	if *debug {
+		dump, err := httputil.DumpRequest(r, true)
+		if err == nil {
+			fmt.Printf("Request:\n%s\n", dump)
+		}
+	}
 
 	for k, vs := range r.Header {
 		for _, e := range vs {
@@ -121,8 +136,24 @@ func (s *Server) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	}
 	// rw.Header().Add("access-control-allow-origin", "*")
 	rw.WriteHeader(resp.StatusCode)
-	io.Copy(rw, resp.Body)
 
+	var respBodyBytes []byte
+	if resp.Body != nil {
+		respBodyBytes, _ = io.ReadAll(resp.Body)
+		resp.Body = io.NopCloser(bytes.NewBuffer(respBodyBytes))
+	}
+	io.Copy(rw, bytes.NewBuffer(respBodyBytes))
+
+	if *debug {
+		contentType := resp.Header.Get("Content-Type")
+		if strings.Contains(contentType, "text/event-stream") || strings.Contains(contentType, "application/json") {
+			resp.Body = io.NopCloser(bytes.NewBuffer(respBodyBytes))
+			dump, err := httputil.DumpResponse(resp, true)
+			if err == nil {
+				fmt.Printf("Response:\n%s\n", dump)
+			}
+		}
+	}
 	fmt.Printf("target [%s] %d %s \n", time.Since(now), resp.StatusCode, r.RequestURI)
 }
 
@@ -130,6 +161,7 @@ var (
 	target = flag.String("target", "", "target host")
 	addr   = flag.String("addr", ":8080", "listen addr")
 	socks  = flag.String("socks", "", "SOCKS proxy address (e.g. 127.0.0.1:1080)")
+	debug  = flag.Bool("debug", false, "enable debug mode (print request and response)")
 
 	upgrader = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
