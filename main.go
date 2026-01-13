@@ -47,7 +47,7 @@ func runRequestHook(r *http.Request, body *[]byte) error {
 	reqObj.Set("headers", headersToObject(ctx, r.Header))
 	reqObj.Set("body", ctx.String(string(*body)))
 
-	hookFn, err := ctx.GetGlobal("handleRequest")
+	hookFn, err := ctx.GetGlobal("beforeRequest")
 	if err != nil {
 		return nil
 	}
@@ -87,7 +87,7 @@ func runRequestHook(r *http.Request, body *[]byte) error {
 	return nil
 }
 
-func runResponseHook(r *http.Request, resp *http.Response, body *[]byte) error {
+func runResponseHook(r *http.Request, reqBodyBytes []byte, resp *http.Response, body *[]byte) error {
 	jsFileMutex.RLock()
 	ctx := jsCtx
 	jsFileMutex.RUnlock()
@@ -95,6 +95,12 @@ func runResponseHook(r *http.Request, resp *http.Response, body *[]byte) error {
 	if ctx == nil {
 		return nil
 	}
+
+	reqObj := ctx.Object()
+	reqObj.Set("method", ctx.String(r.Method))
+	reqObj.Set("url", ctx.String(r.URL.String()))
+	reqObj.Set("headers", headersToObject(ctx, r.Header))
+	reqObj.Set("body", ctx.String(string(reqBodyBytes)))
 
 	respObj := ctx.Object()
 	respObj.Set("status", ctx.Int32(int32(resp.StatusCode)))
@@ -111,7 +117,7 @@ func runResponseHook(r *http.Request, resp *http.Response, body *[]byte) error {
 		return nil
 	}
 
-	result, err := hookFn.Call(ctx.Undefined(), respObj)
+	result, err := hookFn.Call(ctx.Undefined(), reqObj, respObj)
 	if err != nil {
 		log.Printf("Response hook call error: %v", err)
 		return err
@@ -374,8 +380,7 @@ func (s *Server) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	target := fmt.Sprintf("%s/%s", *target, r.RequestURI)
-	target = strings.TrimSuffix(target, "/")
+	target := fmt.Sprintf("%s%s", *target, r.RequestURI)
 
 	var reqBodyBytes []byte
 	if r.Body != nil {
@@ -400,6 +405,7 @@ func (s *Server) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			fmt.Printf("Request:\n%s\n", dump)
 		}
+		fmt.Printf("Target URL: %s\n", target)
 	}
 
 	for k, vs := range r.Header {
@@ -433,7 +439,7 @@ func (s *Server) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	jsFileMutex.RUnlock()
 
 	if shouldRunJS {
-		if err := runResponseHook(r, resp, &respBodyBytes); err != nil {
+		if err := runResponseHook(r, reqBodyBytes, resp, &respBodyBytes); err != nil {
 			log.Printf("Response hook error: %v", err)
 		}
 	}

@@ -1,6 +1,6 @@
 console.log('hooks.js loaded');
 
-function handleRequest(req) {
+function beforeRequest(req) {
   console.log('===== REQUEST =====');
   console.log('Method:', req.method);
   console.log('URL:', req.url);
@@ -12,15 +12,17 @@ function handleRequest(req) {
   return req;
 }
 
-function handleResponse(resp) {
+function handleResponse(req, resp) {
   console.log('===== RESPONSE =====');
   console.log('Status:', resp.status);
+  console.log('Request Method:', req.method);
+  console.log('Request URL:', req.url);
   console.log('Content-Type:', resp.headers['Content-Type'] || resp.headers['content-type']);
   console.log('Body length:', resp.body ? resp.body.length : 0);
-  
+
   try {
     var data = JSON.parse(resp.body);
-    data._proxy = { processed: true, timestamp: new Date().toISOString() };
+    data._proxy = { processed: true, timestamp: new Date().toISOString(), requestMethod: req.method };
     return JSON.stringify(data);
   } catch (e) {
     return resp.body;

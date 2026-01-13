@@ -46,7 +46,7 @@ go build -o proxy
 
 Your JavaScript file should export two optional functions:
 
-### `handleRequest(req)`
+### `beforeRequest(req)`
 
 Called before the request is forwarded to the target.
 
@@ -58,11 +58,15 @@ Called before the request is forwarded to the target.
 
 **Returns:** Modified request object or null/undefined
 
-### `handleResponse(resp)`
+### `handleResponse(req, resp)`
 
 Called before the response is sent back to the client.
 
 **Parameters:**
+- `req.method` (string): HTTP request method
+- `req.url` (string): Request URL
+- `req.headers` (object): Request headers
+- `req.body` (string): Request body
 - `resp.status` (number): HTTP status code
 - `resp.headers` (object): Response headers
 - `resp.body` (string): Response body
@@ -73,7 +77,7 @@ Called before the response is sent back to the client.
 ## Example: `hooks.js`
 
 ```javascript
-function handleRequest(req) {
+function beforeRequest(req) {
   console.log('[REQUEST]', req.method, req.url);
   
   // Add custom header
@@ -97,8 +101,9 @@ function handleRequest(req) {
   return req;
 }
 
-function handleResponse(resp) {
+function handleResponse(req, resp) {
   console.log('[RESPONSE]', resp.status, resp.url);
+  console.log('[REQUEST]', req.method, req.url);
   
   // Add CORS headers
   if (!resp.headers) {
@@ -106,13 +111,13 @@ function handleResponse(resp) {
   }
   resp.headers['Access-Control-Allow-Origin'] = '*';
   
-  // Modify JSON response
+  // Modify JSON response based on request
   const contentType = resp.headers['Content-Type'] || resp.headers['content-type'];
   if (resp.body && contentType && contentType.includes('application/json')) {
     try {
       const data = JSON.parse(resp.body);
       if (typeof data === 'object') {
-        data._proxy = { processed: true };
+        data._proxy = { processed: true, requestMethod: req.method };
         resp.body = JSON.stringify(data);
       }
     } catch (e) {
