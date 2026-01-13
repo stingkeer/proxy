@@ -44,6 +44,8 @@ func runRequestHook(r *http.Request, body *[]byte) error {
 	reqObj := ctx.Object()
 	reqObj.Set("method", ctx.String(r.Method))
 	reqObj.Set("url", ctx.String(r.URL.String()))
+	reqObj.Set("host", ctx.String(r.URL.Host))
+	reqObj.Set("path", ctx.String(r.URL.Path))
 	reqObj.Set("headers", headersToObject(ctx, r.Header))
 	reqObj.Set("body", ctx.String(string(*body)))
 
@@ -99,6 +101,8 @@ func runResponseHook(r *http.Request, reqBodyBytes []byte, resp *http.Response, 
 	reqObj := ctx.Object()
 	reqObj.Set("method", ctx.String(r.Method))
 	reqObj.Set("url", ctx.String(r.URL.String()))
+	reqObj.Set("host", ctx.String(r.URL.Host))
+	reqObj.Set("path", ctx.String(r.URL.Path))
 	reqObj.Set("headers", headersToObject(ctx, r.Header))
 	reqObj.Set("body", ctx.String(string(reqBodyBytes)))
 
