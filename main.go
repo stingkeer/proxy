@@ -10,11 +10,222 @@ import (
 	"net/http/httputil"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/Gaurav-Gosain/quickjs"
 	"github.com/gorilla/websocket"
 	"golang.org/x/net/proxy"
 )
+
+var (
+	rt           *quickjs.Runtime
+	jsCtx        *quickjs.Context
+	jsFile       string
+	jsFileLoaded bool
+	jsFileMutex  sync.RWMutex
+)
+
+func runRequestHook(r *http.Request, body *[]byte) error {
+	jsFileMutex.RLock()
+	ctx := jsCtx
+	jsFileMutex.RUnlock()
+
+	if ctx == nil {
+		return nil
+	}
+
+	reqObj := ctx.Object()
+	reqObj.Set("method", ctx.String(r.Method))
+	reqObj.Set("url", ctx.String(r.URL.String()))
+	reqObj.Set("headers", headersToObject(ctx, r.Header))
+	reqObj.Set("body", ctx.String(string(*body)))
+
+	hookFn, err := ctx.GetGlobal("handleRequest")
+	if err != nil {
+		return nil
+	}
+
+	if !hookFn.IsFunction() {
+		return nil
+	}
+
+	result, err := hookFn.Call(ctx.Undefined(), reqObj)
+	if err != nil {
+		log.Printf("hookFn.Call error: %v", err)
+		return err
+	}
+
+	if result.IsObject() {
+		if newBody, err := result.Get("body"); err == nil {
+			if newBody.IsString() {
+				*body = []byte(newBody.String())
+			}
+		}
+		if newHeaders, err := result.Get("headers"); err == nil && newHeaders.IsObject() {
+			for k := range r.Header {
+				r.Header.Del(k)
+			}
+			headerKeys := []string{"Content-Type", "Content-Length", "Authorization", "User-Agent", "Accept", "X-Custom-Header", "Access-Control-Allow-Origin", "Access-Control-Allow-Methods", "Access-Control-Allow-Headers"}
+			for _, key := range headerKeys {
+				val, err := newHeaders.Get(key)
+				if err == nil && val.IsString() {
+					r.Header.Add(key, val.String())
+				}
+			}
+		}
+	} else {
+		log.Printf("Result is not object, type: %v", result.IsObject())
+	}
+
+	return nil
+}
+
+func runResponseHook(r *http.Request, resp *http.Response, body *[]byte) error {
+	jsFileMutex.RLock()
+	ctx := jsCtx
+	jsFileMutex.RUnlock()
+
+	if ctx == nil {
+		return nil
+	}
+
+	respObj := ctx.Object()
+	respObj.Set("status", ctx.Int32(int32(resp.StatusCode)))
+	respObj.Set("headers", headersToObject(ctx, resp.Header))
+	respObj.Set("body", ctx.String(string(*body)))
+	respObj.Set("url", ctx.String(r.URL.String()))
+
+	hookFn, err := ctx.GetGlobal("handleResponse")
+	if err != nil {
+		return nil
+	}
+
+	if !hookFn.IsFunction() {
+		return nil
+	}
+
+	result, err := hookFn.Call(ctx.Undefined(), respObj)
+	if err != nil {
+		log.Printf("Response hook call error: %v", err)
+		return err
+	}
+
+	if result.IsUndefined() {
+		log.Printf("Response hook returned undefined")
+		return nil
+	}
+
+	if result.IsNull() {
+		log.Printf("Response hook returned null")
+		return nil
+	}
+
+	if result.IsString() {
+		*body = []byte(result.String())
+		return nil
+	}
+
+	if result.IsObject() {
+		log.Printf("Response hook returned object")
+		if newStatus, err := result.Get("status"); err == nil {
+			if newStatus.IsNumber() {
+				if status, err := newStatus.Int32(); err == nil {
+					resp.StatusCode = int(status)
+				}
+			}
+		}
+		if newBody, err := result.Get("body"); err == nil {
+			if newBody.IsString() {
+				log.Printf("New response body length: %d", len(newBody.String()))
+				*body = []byte(newBody.String())
+			}
+		}
+		if newHeaders, err := result.Get("headers"); err == nil && newHeaders.IsObject() {
+			log.Printf("Updating response headers")
+			for k := range resp.Header {
+				resp.Header.Del(k)
+			}
+			headerKeys := []string{"Content-Type", "Content-Length", "Access-Control-Allow-Origin", "Access-Control-Allow-Methods", "Access-Control-Allow-Headers"}
+			for _, key := range headerKeys {
+				val, err := newHeaders.Get(key)
+				if err == nil && val.IsString() {
+					resp.Header.Add(key, val.String())
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+func headersToObject(ctx *quickjs.Context, headers http.Header) quickjs.Value {
+	obj := ctx.Object()
+	for k, vs := range headers {
+		if len(vs) == 1 {
+			obj.Set(k, ctx.String(vs[0]))
+		} else {
+			arr := ctx.Array()
+			for i, v := range vs {
+				arr.SetIdx(i, ctx.String(v))
+			}
+			obj.Set(k, arr)
+		}
+	}
+	return obj
+}
+
+func loadJSFile() error {
+	if jsFile == "" {
+		return nil
+	}
+
+	if rt != nil {
+		rt.Close()
+		jsCtx = nil
+	}
+
+	var err error
+	rt, err = quickjs.NewRuntime()
+	if err != nil {
+		return fmt.Errorf("failed to create runtime: %w", err)
+	}
+
+	jsCtx, err = rt.NewContext()
+	if err != nil {
+		return fmt.Errorf("failed to create context: %w", err)
+	}
+
+	logFn := jsCtx.Function("log", func(ctx *quickjs.Context, this quickjs.Value, args []quickjs.Value) quickjs.Value {
+		msg := ""
+		for _, arg := range args {
+			msg += arg.String() + " "
+		}
+		log.Printf("[JS] %s", strings.TrimSpace(msg))
+		return jsCtx.Undefined()
+	})
+	global, _ := jsCtx.Global()
+	global.Set("console", jsCtx.Object())
+	console, _ := global.Get("console")
+	console.Set("log", logFn)
+	console.Set("error", logFn)
+
+	content, err := os.ReadFile(jsFile)
+	if err != nil {
+		return fmt.Errorf("failed to read JS file: %w", err)
+	}
+
+	log.Printf("Loading JavaScript file: %s", jsFile)
+	if _, err := jsCtx.Eval(string(content)); err != nil {
+		return fmt.Errorf("failed to evaluate JS: %w", err)
+	}
+
+	jsFileMutex.Lock()
+	jsFileLoaded = true
+	jsFileMutex.Unlock()
+
+	return nil
+}
 
 var _ http.Handler = &Server{}
 
@@ -107,6 +318,17 @@ func (s *Server) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		reqBodyBytes, _ = io.ReadAll(r.Body)
 		r.Body = io.NopCloser(bytes.NewBuffer(reqBodyBytes))
 	}
+
+	jsFileMutex.RLock()
+	shouldRunJS := jsFileLoaded && rt != nil
+	jsFileMutex.RUnlock()
+
+	if shouldRunJS {
+		if err := runRequestHook(r, &reqBodyBytes); err != nil {
+			log.Printf("Request hook error: %v", err)
+		}
+	}
+
 	req, _ := http.NewRequest(r.Method, target, bytes.NewBuffer(reqBodyBytes))
 
 	if *debug {
@@ -134,7 +356,6 @@ func (s *Server) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 			rw.Header().Add(k, e)
 		}
 	}
-	// rw.Header().Add("access-control-allow-origin", "*")
 	rw.WriteHeader(resp.StatusCode)
 
 	var respBodyBytes []byte
@@ -142,6 +363,17 @@ func (s *Server) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		respBodyBytes, _ = io.ReadAll(resp.Body)
 		resp.Body = io.NopCloser(bytes.NewBuffer(respBodyBytes))
 	}
+
+	jsFileMutex.RLock()
+	shouldRunJS = jsFileLoaded && rt != nil
+	jsFileMutex.RUnlock()
+
+	if shouldRunJS {
+		if err := runResponseHook(r, resp, &respBodyBytes); err != nil {
+			log.Printf("Response hook error: %v", err)
+		}
+	}
+
 	io.Copy(rw, bytes.NewBuffer(respBodyBytes))
 
 	if *debug {
@@ -162,6 +394,7 @@ var (
 	addr   = flag.String("addr", ":8080", "listen addr")
 	socks  = flag.String("socks", "", "SOCKS proxy address (e.g. 127.0.0.1:1080)")
 	debug  = flag.Bool("debug", false, "enable debug mode (print request and response)")
+	script = flag.String("script", "", "path to JavaScript file for request/response modification")
 
 	upgrader = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
@@ -176,6 +409,15 @@ func main() {
 		flag.Usage()
 		return
 	}
+
+	jsFile = *script
+	if jsFile != "" {
+		if err := loadJSFile(); err != nil {
+			log.Fatalf("Failed to load JS file: %v", err)
+		}
+		fmt.Printf("Loaded JavaScript script: %s\n", jsFile)
+	}
+
 	initClient()
 	fmt.Printf("Listen %s", *addr)
 	if err := http.ListenAndServe(*addr, &Server{}); err != nil {
