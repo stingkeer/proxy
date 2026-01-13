@@ -9,11 +9,13 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/Gaurav-Gosain/quickjs"
+	"github.com/fsnotify/fsnotify"
 	"github.com/gorilla/websocket"
 	"golang.org/x/net/proxy"
 )
@@ -227,6 +229,64 @@ func loadJSFile() error {
 	return nil
 }
 
+func watchJSFile() {
+	log.Printf("Starting file watcher...")
+	if jsFile == "" {
+		log.Printf("No JS file specified, skipping file watcher")
+		return
+	}
+
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		log.Printf("Failed to create file watcher: %v", err)
+		return
+	}
+	defer watcher.Close()
+
+	absPath, err := filepath.Abs(jsFile)
+	if err != nil {
+		log.Printf("Failed to get absolute path: %v", err)
+		return
+	}
+
+	dir := filepath.Dir(absPath)
+	if err := watcher.Add(dir); err != nil {
+		log.Printf("Failed to watch directory: %v", err)
+		return
+	}
+
+	log.Printf("Watching JavaScript file for changes: %s", absPath)
+
+	for {
+		select {
+		case event, ok := <-watcher.Events:
+			if !ok {
+				return
+			}
+
+			absEventPath, err := filepath.Abs(event.Name)
+			if err != nil {
+				continue
+			}
+
+			if absEventPath == absPath && (event.Op&fsnotify.Write == fsnotify.Write || event.Op&fsnotify.Create == fsnotify.Create) {
+				log.Printf("JavaScript file modified, reloading...")
+				if err := loadJSFile(); err != nil {
+					log.Printf("Failed to reload JS file: %v", err)
+				} else {
+					log.Printf("JavaScript file reloaded successfully")
+				}
+			}
+
+		case err, ok := <-watcher.Errors:
+			if !ok {
+				return
+			}
+			log.Printf("File watcher error: %v", err)
+		}
+	}
+}
+
 var _ http.Handler = &Server{}
 
 type Server struct{}
@@ -416,6 +476,8 @@ func main() {
 			log.Fatalf("Failed to load JS file: %v", err)
 		}
 		fmt.Printf("Loaded JavaScript script: %s\n", jsFile)
+
+		go watchJSFile()
 	}
 
 	initClient()
