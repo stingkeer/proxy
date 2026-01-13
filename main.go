@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	_ "embed"
 	"flag"
 	"fmt"
 	"io"
@@ -19,6 +20,9 @@ import (
 	"github.com/gorilla/websocket"
 	"golang.org/x/net/proxy"
 )
+
+//go:embed hooks.js
+var hooksContent []byte
 
 var (
 	rt           *quickjs.Runtime
@@ -455,6 +459,7 @@ var (
 	socks  = flag.String("socks", "", "SOCKS proxy address (e.g. 127.0.0.1:1080)")
 	debug  = flag.Bool("debug", false, "enable debug mode (print request and response)")
 	script = flag.String("script", "", "path to JavaScript file for request/response modification")
+	temp   = flag.Bool("temp", false, "extract hook.js from hooks.js")
 
 	upgrader = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
@@ -467,6 +472,15 @@ func main() {
 	flag.Parse()
 	if len(os.Args) <= 1 {
 		flag.Usage()
+		return
+	}
+
+	if *temp {
+		err := os.WriteFile("hook.js", hooksContent, 0644)
+		if err != nil {
+			log.Fatalf("Failed to write hook.js: %v", err)
+		}
+		fmt.Println("hook.js created successfully")
 		return
 	}
 
